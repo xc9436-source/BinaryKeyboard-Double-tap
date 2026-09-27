@@ -1,5 +1,5 @@
 import { useTerminalStore } from "@/stores/terminalStore";
-import type { DeviceProtocol } from "@/types/protocol";
+import type { DeviceProtocol, KeyTuningConfig } from "@/types/protocol";
 import type {
   DeviceCodec,
   CodecCommandOptions,
@@ -149,6 +149,29 @@ export abstract class BaseHidAdapter<TResponse> implements HidAdapter {
     config: Parameters<DeviceCodec<TResponse>["setFullKeymap"]>[1],
   ) {
     await this.codec.setFullKeymap(this.transport, config);
+  }
+
+  /** 读取按键判定参数；设备不支持时返回 null */
+  async getKeyTuning(): Promise<KeyTuningConfig | null> {
+    const read = this.codec.getKeyTuning;
+    if (!read) return null;
+    try {
+      return await read.call(this.codec, this.transport);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 写入按键判定参数；设备不支持时返回 false */
+  async setKeyTuning(config: KeyTuningConfig): Promise<boolean> {
+    const write = this.codec.setKeyTuning;
+    if (!write) return false;
+    try {
+      await write.call(this.codec, this.transport, config);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async sendRawFrame(frame: Uint8Array, timeout = 3000): Promise<DataView> {

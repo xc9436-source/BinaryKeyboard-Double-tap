@@ -1,6 +1,9 @@
 import {
+  ACTION_SLOTS,
   CH592_CAPABILITIES,
   Command,
+  DEFAULT_DOUBLE_CLICK_MS,
+  DEFAULT_LONG_PRESS_MS,
   DeviceProtocol,
   FRAME_SIZE,
   MAX_FN_KEYS,
@@ -8,13 +11,17 @@ import {
   MacroActionType,
   OsMode,
   ResponseCode,
+  ActionSlot,
   createEmptyAction,
   createEmptyKeymap,
+  createEmptyLayer,
+  getSlotKeys,
   type DeviceInfo,
   type DeviceStatus,
   type FnKeyConfig,
   type FnKeyEntry,
   type KeyAction,
+  type KeyTuningConfig,
   type LayerConfig,
   type LogConfig,
   type KeymapConfig,
@@ -198,11 +205,13 @@ export class Ch592Codec implements DeviceCodec<DataView> {
     return status;
   }
 
-  parseKeymap(resp: DataView): { numLayers: number; currentLayer: number; defaultLayer: number; layer: LayerConfig } {
+  parseKeymap(resp: DataView): { numLayers: number; currentLayer: number; defaultLayer: number; slot: number; layer: LayerConfig } {
     const d = this.expectOk(resp, 'KEYMAP_GET');
     const numLayers = resp.getUint8(d + 1);
     const currentLayer = resp.getUint8(d + 2);
     const defaultLayer = resp.getUint8(d + 3);
+    /* sub 高 4 位为动作槽，低 4 位为层号 */
+    const slot = (resp.getUint8(1) >> 4) & 0x0f;
     const keys: KeyAction[] = [];
 
     for (let i = 0; i < MAX_KEYS; i++) {
@@ -215,17 +224,33 @@ export class Ch592Codec implements DeviceCodec<DataView> {
       });
     }
 
-    return { numLayers, currentLayer, defaultLayer, layer: { keys } };
+    const layer = createEmptyLayer();
+    this.assignSlot(layer, slot, keys);
+
+    return { numLayers, currentLayer, defaultLayer, slot, layer };
   }
 
-  buildSetKeymapPayload(numLayers: number, defaultLayer: number, layer: LayerConfig): Uint8Array {
+  /** 把某一槽位的键位数组写回层配置 */
+  private assignSlot(layer: LayerConfig, slot: number, keys: KeyAction[]): void {
+    const target: KeyAction[] = Array.from({ length: MAX_KEYS }, (_, i) => keys[i] || createEmptyAction());
+    if (slot === ActionSlot.DOUBLE) {
+      layer.doubleKeys = target;
+    } else if (slot === ActionSlot.LONG) {
+      layer.longKeys = target;
+    } else {
+      layer.keys = target;
+    }
+  }
+
+  buildSetKeymapPayload(numLayers: number, defaultLayer: number, layer: LayerConfig, slot: ActionSlot = ActionSlot.CLICK): Uint8Array {
     const data = new Uint8Array(35);
     data[0] = numLayers;
     data[1] = 0;
     data[2] = defaultLayer;
 
+    const keys = getSlotKeys(layer, slot);
     for (let i = 0; i < MAX_KEYS; i++) {
-      const key = layer.keys[i] || createEmptyAction();
+      const key = keys[i] || createEmptyAction();
       const offset = 3 + i * 4;
       data[offset] = key.type;
       data[offset + 1] = key.modifier;
@@ -234,6 +259,11 @@ export class Ch592Codec implements DeviceCodec<DataView> {
     }
 
     return data;
+  }
+
+  /** KEYMAP GET/SET 的 sub 编码：高 4 位=动作槽，低 4 位=层号 */
+  private keymapSub(slot: ActionSlot, layer: number): number {
+    return ((slot & 0x0f) << 4) | (layer & 0x0f);
   }
 
   parseRgbConfig(resp: DataView): RgbConfig {
@@ -376,24 +406,107 @@ export class Ch592Codec implements DeviceCodec<DataView> {
   }
 
   async getFullKeymap(transport: CodecTransport<DataView>): Promise<KeymapConfig> {
-    const first = await this.getKeymap(transport, 0);
+    const first = await this.getKeymap(transport, 0, ActionSlot.CLICK);
     const layers = createEmptyKeymap().layers;
     layers[0] = first.layer;
 
     for (let i = 1; i < first.numLayers; i++) {
-      const result = await this.getKeymap(transport, i);
+      const result = await this.getKeymap(transport, i, ActionSlot.CLICK);
       layers[i] = result.layer;
+    }
+
+    /* 双击 / 长按槽：旧固件不支持时静默降级为空 */
+    for (let i = 0; i < first.numLayers; i++) {
+      for (let s = 1; s < ACTION_SLOTS; s++) {
+        const slot = s as ActionSlot;
+        const keys = await this.tryGetKeymapSlot(transport, i, slot);
+        if (keys) {
+          this.assignSlot(layers[i], slot, keys);
+        }
+      }
     }
 
     return this.buildFullKeymap(first, layers);
   }
 
+  /** 尝试读取指定槽位，失败（旧固件）返回 null */
+  private async tryGetKeymapSlot(
+    transport: CodecTransport<DataView>,
+    layerIndex: number,
+    slot: ActionSlot,
+  ): Promise<KeyAction[] | null> {
+    try {
+      const resp = await this.sendCommand(transport, Command.KEYMAP_GET, this.keymapSub(slot, layerIndex));
+      const d = this.expectOk(resp, 'KEYMAP_GET');
+      const keys: KeyAction[] = [];
+      for (let i = 0; i < MAX_KEYS; i++) {
+        const offset = d + 4 + i * 4;
+        keys.push({
+          type: resp.getUint8(offset),
+          modifier: resp.getUint8(offset + 1),
+          param1: resp.getUint8(offset + 2),
+          param2: resp.getUint8(offset + 3),
+        });
+      }
+      return keys;
+    } catch {
+      return null;
+    }
+  }
+
   async setFullKeymap(transport: CodecTransport<DataView>, config: KeymapConfig): Promise<void> {
     for (let i = 0; i < config.numLayers; i++) {
-      const data = this.buildSetKeymapPayload(config.numLayers, config.defaultLayer, config.layers[i]);
-      const resp = await this.sendCommand(transport, Command.KEYMAP_SET, i, data);
+      const data = this.buildSetKeymapPayload(config.numLayers, config.defaultLayer, config.layers[i], ActionSlot.CLICK);
+      const resp = await this.sendCommand(transport, Command.KEYMAP_SET, this.keymapSub(ActionSlot.CLICK, i), data);
       this.expectOk(resp, 'KEYMAP_SET');
     }
+
+    /* 双击 / 长按槽：仅写入非空槽位，旧固件失败时忽略 */
+    for (let i = 0; i < config.numLayers; i++) {
+      for (let s = 1; s < ACTION_SLOTS; s++) {
+        const slot = s as ActionSlot;
+        const keys = getSlotKeys(config.layers[i], slot);
+        if (!keys.some((k) => k.type !== 0)) {
+          continue;
+        }
+        try {
+          const data = this.buildSetKeymapPayload(config.numLayers, config.defaultLayer, config.layers[i], slot);
+          const resp = await this.sendCommand(transport, Command.KEYMAP_SET, this.keymapSub(slot, i), data);
+          this.expectOk(resp, 'KEYMAP_SET');
+        } catch {
+          /* 设备不支持该槽位，忽略 */
+        }
+      }
+    }
+  }
+
+  parseKeyTuning(resp: DataView): KeyTuningConfig {
+    const d = this.expectOk(resp, 'TUNING_GET');
+    const longPressMs = resp.getUint16(d + 1, true);
+    const doubleClickMs = resp.getUint16(d + 3, true);
+    return {
+      longPressMs: longPressMs === 0 ? DEFAULT_LONG_PRESS_MS : longPressMs,
+      doubleClickMs: doubleClickMs === 0 ? DEFAULT_DOUBLE_CLICK_MS : doubleClickMs,
+    };
+  }
+
+  buildSetKeyTuningPayload(config: KeyTuningConfig): Uint8Array {
+    const data = new Uint8Array(4);
+    data[0] = config.longPressMs & 0xff;
+    data[1] = (config.longPressMs >> 8) & 0xff;
+    data[2] = config.doubleClickMs & 0xff;
+    data[3] = (config.doubleClickMs >> 8) & 0xff;
+    return data;
+  }
+
+  async getKeyTuning(transport: CodecTransport<DataView>): Promise<KeyTuningConfig> {
+    const resp = await this.sendCommand(transport, Command.TUNING_GET);
+    return this.parseKeyTuning(resp);
+  }
+
+  async setKeyTuning(transport: CodecTransport<DataView>, config: KeyTuningConfig): Promise<void> {
+    const resp = await this.sendCommand(transport, Command.TUNING_SET, 0, this.buildSetKeyTuningPayload(config));
+    this.expectOk(resp, 'TUNING_SET');
   }
 
   private async sendCommand(
@@ -412,8 +525,9 @@ export class Ch592Codec implements DeviceCodec<DataView> {
   private async getKeymap(
     transport: CodecTransport<DataView>,
     layerIndex: number,
-  ): Promise<{ numLayers: number; currentLayer: number; defaultLayer: number; layer: KeymapConfig['layers'][number] }> {
-    const resp = await this.sendCommand(transport, Command.KEYMAP_GET, layerIndex);
+    slot: ActionSlot = ActionSlot.CLICK,
+  ): Promise<{ numLayers: number; currentLayer: number; defaultLayer: number; slot: number; layer: KeymapConfig['layers'][number] }> {
+    const resp = await this.sendCommand(transport, Command.KEYMAP_GET, this.keymapSub(slot, layerIndex));
     return this.parseKeymap(resp);
   }
 

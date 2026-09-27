@@ -14,12 +14,16 @@ import {
   type RgbConfig,
   type FnKeyConfig,
   type KeyAction,
+  type KeyTuningConfig,
+  ActionSlot,
+  getSlotKeys,
   OsMode,
   type OsModeConfig,
   KeyboardTypeInfo,
   createEmptyKeymap,
   createEmptyFnKeyConfig,
   createDefaultRgbConfig,
+  createDefaultKeyTuning,
   MAX_LAYERS,
 } from "@/types/protocol";
 
@@ -39,6 +43,7 @@ export const useDeviceStore = defineStore("device", () => {
     explicitSave: false,
     wireless: false,
     iap: false,
+    keyGestures: false,
   };
 
   // ========================================
@@ -71,6 +76,15 @@ export const useDeviceStore = defineStore("device", () => {
 
   /** 当前编辑的层索引 */
   const currentEditLayer = ref(0);
+
+  /** 当前编辑的动作槽位 (单击 / 双击 / 长按) */
+  const currentActionSlot = ref<ActionSlot>(ActionSlot.CLICK);
+
+  /** 按键判定参数 (长按阈值 / 双击窗口) */
+  const keyTuning = ref<KeyTuningConfig>(createDefaultKeyTuning());
+
+  /** 原始按键判定参数 (用于比较变更) */
+  const keyTuningOriginal = ref<KeyTuningConfig>(createDefaultKeyTuning());
 
   /** 电池电压 (V, 如 4.12) */
   const batteryVoltage = ref(0);
@@ -152,6 +166,8 @@ export const useDeviceStore = defineStore("device", () => {
   const supportsWheelClickAction = computed(
     () => capabilities.value.wheelClickAction,
   );
+  /** 是否支持普通键双击 / 长按动作槽 */
+  const supportsKeyGestures = computed(() => capabilities.value.keyGestures);
   const supportsBattery = computed(() => capabilities.value.battery);
   const supportsLogs = computed(() => capabilities.value.logs);
   const supportsFactoryReset = computed(() => capabilities.value.reset);
@@ -191,7 +207,7 @@ export const useDeviceStore = defineStore("device", () => {
     return isDevFirmware.value ? "dev" : `v${firmwareVersion.value}`;
   });
 
-  /** 当前层的按键列表 */
+  /** 当前层的按键列表 (单击槽) */
   const currentLayerKeys = computed(() => {
     return (
       keymap.value.layers[currentEditLayer.value]?.keys.slice(
@@ -201,10 +217,30 @@ export const useDeviceStore = defineStore("device", () => {
     );
   });
 
+  /** 当前层 + 当前动作槽的按键列表 */
+  const currentLayerSlotKeys = computed(() => {
+    const layer = keymap.value.layers[currentEditLayer.value];
+    if (!layer) return [];
+    return getSlotKeys(layer, currentActionSlot.value).slice(
+      0,
+      actualKeyCount.value,
+    );
+  });
+
   /** 是否有未保存的更改 */
   const hasChanges = computed(() => {
     return (
-      JSON.stringify(keymap.value) !== JSON.stringify(keymapOriginal.value)
+      JSON.stringify(keymap.value) !== JSON.stringify(keymapOriginal.value) ||
+      JSON.stringify(keyTuning.value) !==
+        JSON.stringify(keyTuningOriginal.value)
+    );
+  });
+
+  /** 按键判定参数是否有未保存的更改 */
+  const keyTuningHasChanges = computed(() => {
+    return (
+      JSON.stringify(keyTuning.value) !==
+      JSON.stringify(keyTuningOriginal.value)
     );
   });
 
@@ -252,6 +288,9 @@ export const useDeviceStore = defineStore("device", () => {
     fnKeyConfig.value = createEmptyFnKeyConfig();
     osModeConfig.value = { mode: OsMode.WIN };
     currentEditLayer.value = 0;
+    currentActionSlot.value = ActionSlot.CLICK;
+    keyTuning.value = createDefaultKeyTuning();
+    keyTuningOriginal.value = createDefaultKeyTuning();
     useMacroStore().reset();
   }
 
@@ -308,6 +347,13 @@ export const useDeviceStore = defineStore("device", () => {
         await refreshOsMode();
       } else {
         osModeConfig.value = { mode: OsMode.WIN };
+      }
+      if (supportsKeyGestures.value) {
+        await refreshKeyTuning();
+      } else {
+        keyTuning.value = createDefaultKeyTuning();
+        keyTuningOriginal.value = createDefaultKeyTuning();
+        currentActionSlot.value = ActionSlot.CLICK;
       }
     } catch (error) {
       errorMessage.value = error instanceof Error ? error.message : "连接失败";
@@ -496,38 +542,87 @@ export const useDeviceStore = defineStore("device", () => {
     }
   }
 
-  /** 设置某个键的动作 */
+  /** 设置某个键的动作（可指定层与动作槽） */
   function setKeyAction(
     keyIndex: number,
     action: KeyAction,
     layerIndex?: number,
+    slot?: ActionSlot,
   ): void {
     const layer = layerIndex ?? currentEditLayer.value;
+    const targetSlot = slot ?? currentActionSlot.value;
     if (
       layer >= 0 &&
       layer < keymap.value.numLayers &&
       keyIndex >= 0 &&
       keyIndex < actualKeyCount.value
     ) {
-      keymap.value.layers[layer].keys[keyIndex] = { ...action };
+      const keys = getSlotKeys(keymap.value.layers[layer], targetSlot);
+      keys[keyIndex] = { ...action };
     }
   }
 
-  /** 获取某个键的动作 */
+  /** 获取某个键的动作（可指定层与动作槽） */
   function getKeyAction(
     keyIndex: number,
     layerIndex?: number,
+    slot?: ActionSlot,
   ): KeyAction | null {
     const layer = layerIndex ?? currentEditLayer.value;
+    const targetSlot = slot ?? currentActionSlot.value;
     if (
       layer >= 0 &&
       layer < keymap.value.numLayers &&
       keyIndex >= 0 &&
       keyIndex < actualKeyCount.value
     ) {
-      return keymap.value.layers[layer].keys[keyIndex];
+      return getSlotKeys(keymap.value.layers[layer], targetSlot)[keyIndex] ?? null;
     }
     return null;
+  }
+
+  /** 切换编辑的动作槽位 */
+  function setActionSlot(slot: ActionSlot): void {
+    if (!supportsKeyGestures.value && slot !== ActionSlot.CLICK) {
+      return;
+    }
+    currentActionSlot.value = slot;
+  }
+
+  /** 读取按键判定参数 */
+  async function refreshKeyTuning(): Promise<void> {
+    const tuning = await hidService.getKeyTuning();
+    if (tuning) {
+      keyTuning.value = { ...tuning };
+      keyTuningOriginal.value = { ...tuning };
+    } else {
+      keyTuning.value = createDefaultKeyTuning();
+      keyTuningOriginal.value = createDefaultKeyTuning();
+    }
+  }
+
+  /** 保存按键判定参数（设备侧自动落盘） */
+  async function saveKeyTuning(): Promise<boolean> {
+    isLoading.value = true;
+    errorMessage.value = null;
+    try {
+      const ok = await hidService.setKeyTuning(keyTuning.value);
+      if (ok) {
+        if (supportsExplicitSave.value) {
+          await hidService.saveConfig();
+        }
+        keyTuningOriginal.value = { ...keyTuning.value };
+      } else {
+        errorMessage.value = "当前固件不支持按键判定参数设置";
+      }
+      return ok;
+    } catch (err) {
+      errorMessage.value =
+        err instanceof Error ? err.message : "保存按键判定参数失败";
+      return false;
+    } finally {
+      isLoading.value = false;
+    }
   }
 
   /** 切换编辑层 */
@@ -574,6 +669,7 @@ export const useDeviceStore = defineStore("device", () => {
   /** 放弃更改 */
   function discardChanges(): void {
     keymap.value = cloneKeymapConfig(keymapOriginal.value);
+    keyTuning.value = { ...keyTuningOriginal.value };
     currentEditLayer.value = keymap.value.currentLayer;
   }
 
@@ -639,6 +735,9 @@ export const useDeviceStore = defineStore("device", () => {
     fnKeyConfig,
     osModeConfig,
     currentEditLayer,
+    currentActionSlot,
+    keyTuning,
+    keyTuningOriginal,
     batteryVoltage,
     iapInProgress,
     isLoading,
@@ -655,6 +754,7 @@ export const useDeviceStore = defineStore("device", () => {
     supportsOsMode,
     supportsMacroActions,
     supportsWheelClickAction,
+    supportsKeyGestures,
     supportsBattery,
     supportsLogs,
     supportsFactoryReset,
@@ -666,7 +766,9 @@ export const useDeviceStore = defineStore("device", () => {
     firmwareVersion,
     firmwareVersionLabel,
     currentLayerKeys,
+    currentLayerSlotKeys,
     hasChanges,
+    keyTuningHasChanges,
     deviceInfoList,
 
     // 方法
@@ -680,13 +782,16 @@ export const useDeviceStore = defineStore("device", () => {
     refreshFnKeyConfig,
     refreshOsMode,
     refreshMacroOverview,
+    refreshKeyTuning,
     saveKeymap,
+    saveKeyTuning,
     saveRgbConfig,
     saveFnKeyConfig,
     saveOsMode,
     resetToFactory,
     setKeyAction,
     getKeyAction,
+    setActionSlot,
     setEditLayer,
     addLayer,
     removeLayer,

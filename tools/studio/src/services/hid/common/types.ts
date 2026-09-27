@@ -2,6 +2,7 @@ import type {
   DeviceInfo,
   DeviceStatus,
   KeymapConfig,
+  KeyTuningConfig,
   RgbConfig,
   FnKeyConfig,
   LogConfig,
@@ -86,6 +87,10 @@ export interface HidAdapter {
   getSysStatus(): Promise<DeviceStatus>;
   getFullKeymap(): Promise<KeymapConfig>;
   setFullKeymap(config: KeymapConfig): Promise<void>;
+
+  /** 按键判定参数：不支持时返回 null / false */
+  getKeyTuning(): Promise<KeyTuningConfig | null>;
+  setKeyTuning(config: KeyTuningConfig): Promise<boolean>;
 
   /** 发送原始 HID 帧并等待响应 (IAP 等底层操作使用) */
   sendRawFrame(frame: Uint8Array, timeout?: number): Promise<DataView>;

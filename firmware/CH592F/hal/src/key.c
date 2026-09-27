@@ -251,6 +251,12 @@ static volatile uint32_t s_tick_ms = 0;
  */
 static inline uint32_t GetTickMs(void) { return s_tick_ms; }
 
+/**
+ * @brief 获取按键驱动毫秒计数（对外）。
+ * @return 自 Key_Init() 或最近一次 Key_ExitSleep() 起的毫秒数。
+ */
+uint32_t Key_GetTickMs(void) { return s_tick_ms; }
+
 /* ============================================================================
  * Contexts
  * ============================================================================

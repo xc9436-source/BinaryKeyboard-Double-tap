@@ -65,6 +65,8 @@ export interface DeviceCapabilities {
   explicitSave: boolean;
   wireless: boolean;
   iap: boolean;
+  /** 支持普通键的双击 / 长按动作槽 */
+  keyGestures: boolean;
 }
 
 export function createDeviceCapabilities(
@@ -85,6 +87,7 @@ export function createDeviceCapabilities(
     explicitSave: true,
     wireless: true,
     iap: true,
+    keyGestures: true,
     ...overrides,
   };
 }
@@ -105,6 +108,7 @@ export const CH552_CAPABILITIES = createDeviceCapabilities({
   explicitSave: false,
   wireless: false,
   iap: false,
+  keyGestures: false,
 });
 
 // ============================================================================
@@ -128,6 +132,8 @@ export enum Command {
   KEYMAP_SET = 0x21,
   LAYER_GET = 0x22,
   LAYER_SET = 0x23,
+  TUNING_GET = 0x24,
+  TUNING_SET = 0x25,
 
   // RGB 控制 0x30-0x3F
   RGB_GET = 0x30,
@@ -360,9 +366,38 @@ export interface KeyAction {
   param2: number; // 多媒体键高字节
 }
 
-/** 单层映射 (32 字节 = 8 键 × 4 字节) */
+/** 按键动作槽位（与固件 kbd_action_slot_t 对应） */
+export enum ActionSlot {
+  CLICK = 0, // 单击
+  DOUBLE = 1, // 双击
+  LONG = 2, // 长按
+}
+
+export const ACTION_SLOTS = 3;
+
+/** 槽位 UI 标签 */
+export const ACTION_SLOT_LABELS: {
+  slot: ActionSlot;
+  label: string;
+  hint: string;
+}[] = [
+  { slot: ActionSlot.CLICK, label: "单击", hint: "按一次立即触发" },
+  { slot: ActionSlot.DOUBLE, label: "双击", hint: "快速按两次触发" },
+  { slot: ActionSlot.LONG, label: "长按", hint: "按住达到阈值触发" },
+];
+
+/** 单层映射 (96 字节 = 3 槽 × 8 键 × 4 字节) */
 export interface LayerConfig {
-  keys: KeyAction[]; // 8 个按键
+  keys: KeyAction[]; // 单击槽，8 个按键
+  doubleKeys: KeyAction[]; // 双击槽，8 个按键
+  longKeys: KeyAction[]; // 长按槽，8 个按键
+}
+
+/** 按槽位取键位数组 */
+export function getSlotKeys(layer: LayerConfig, slot: ActionSlot): KeyAction[] {
+  if (slot === ActionSlot.DOUBLE) return layer.doubleKeys ?? [];
+  if (slot === ActionSlot.LONG) return layer.longKeys ?? [];
+  return layer.keys ?? [];
 }
 
 /** 完整按键映射配置 */
@@ -599,9 +634,13 @@ export function createMacroAction(macroId: number, trigger: MacroTrigger = Macro
   return { type: ActionType.MACRO, modifier: trigger, param1: macroId, param2: 0 };
 }
 
-/** 创建空层 */
+/** 创建空层（含双击 / 长按槽） */
 export function createEmptyLayer(): LayerConfig {
-  return { keys: Array.from({ length: MAX_KEYS }, () => createEmptyAction()) };
+  return {
+    keys: Array.from({ length: MAX_KEYS }, () => createEmptyAction()),
+    doubleKeys: Array.from({ length: MAX_KEYS }, () => createEmptyAction()),
+    longKeys: Array.from({ length: MAX_KEYS }, () => createEmptyAction()),
+  };
 }
 
 /** 创建空映射配置 */
@@ -629,6 +668,33 @@ export function createEmptyFnKey(): FnKeyEntry {
 export function createEmptyFnKeyConfig(): FnKeyConfig {
   return {
     fnKeys: Array.from({ length: MAX_FN_KEYS }, () => createEmptyFnKey()),
+  };
+}
+
+// ============================================================================
+// 按键判定参数（长按阈值 / 双击窗口）
+// ============================================================================
+
+/** 默认长按阈值 (ms)，与固件 KBD_DEFAULT_LONG_PRESS_MS 一致 */
+export const DEFAULT_LONG_PRESS_MS = 500;
+/** 默认双击窗口 (ms)，与固件 KBD_DEFAULT_DOUBLE_CLICK_MS 一致 */
+export const DEFAULT_DOUBLE_CLICK_MS = 250;
+
+export const MIN_LONG_PRESS_MS = 100;
+export const MAX_LONG_PRESS_MS = 5000;
+export const MIN_DOUBLE_CLICK_MS = 80;
+export const MAX_DOUBLE_CLICK_MS = 1000;
+
+/** 按键判定参数 */
+export interface KeyTuningConfig {
+  longPressMs: number;
+  doubleClickMs: number;
+}
+
+export function createDefaultKeyTuning(): KeyTuningConfig {
+  return {
+    longPressMs: DEFAULT_LONG_PRESS_MS,
+    doubleClickMs: DEFAULT_DOUBLE_CLICK_MS,
   };
 }
 

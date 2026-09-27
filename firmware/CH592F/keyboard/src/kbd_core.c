@@ -40,6 +40,32 @@ static uint8_t s_momentary_restore_layer[KBD_MAX_KEYS] = {0};
 /** Latest complete keyboard state has not yet been accepted by the transport. */
 static uint8_t s_keyboard_report_dirty = 1;
 
+/*============================================================================*/
+/* 单击 / 双击 / 长按 判定状态机                                              */
+/*============================================================================*/
+
+/**
+ * @brief 单个按键的判定状态
+ */
+typedef enum
+{
+    KSTATE_IDLE = 0,    /**< 空闲 */
+    KSTATE_PRESS_HELD,  /**< 已按下，等待长按阈值到期（尚未执行任何动作） */
+    KSTATE_ACTIVE,      /**< 动作已按下，等待释放以执行释放 */
+    KSTATE_DOUBLE_WAIT, /**< 已松开，等待双击窗口内的第二次按下 */
+} kbd_key_state_t;
+
+typedef struct
+{
+    uint8_t state;        /**< @ref kbd_key_state_t */
+    uint8_t slot;         /**< KSTATE_ACTIVE 时生效的动作槽 */
+    uint32_t deadline_ms; /**< 到期时刻；0 表示不超时（等待松开） */
+} kbd_key_fsm_t;
+
+static kbd_key_fsm_t s_key_fsm[KBD_MAX_KEYS];
+/** 上一次观察到的驱动 tick，用于识别休眠唤醒后的计数复位 */
+static uint32_t s_last_tick_ms = 0;
+
 static const uint8_t s_modifier_bits[8] = {
     0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80,
 };
@@ -64,6 +90,17 @@ static void UpdateKeycodeRefcount(uint8_t keycode, bool pressed);
 static void UpdateModifierMask(uint8_t mask, bool pressed);
 static void UpdateMouseButtons(uint8_t buttons, bool pressed);
 static void SwitchLayer(uint8_t target_layer);
+static void ResetKeyFsm(void);
+static void KbdCore_TickKeys(uint32_t now_ms);
+static bool GestureEnabledForKey(uint8_t key_index);
+static bool IsSlotConfigured(uint8_t key_index, uint8_t slot);
+static void HandlePlainKey(uint8_t key_index, bool pressed);
+static void AbortGesture(uint8_t key_index);
+static void GesturePress(uint8_t key_index, uint32_t now_ms);
+static void GestureRelease(uint8_t key_index, uint32_t now_ms);
+static void StartSlotAction(uint8_t key_index, uint8_t slot);
+static void FinishActiveAction(uint8_t key_index);
+static void FireTapAction(uint8_t key_index, uint8_t slot);
 static void ExecuteKeyAction(uint8_t key_index, const kbd_action_t *action, bool pressed);
 static void ExecuteFnAction(kbd_fn_action_t action, uint8_t param);
 static void OnModeChange(kbd_work_mode_t new_mode);
@@ -131,6 +168,9 @@ void KBD_Core_Process(void)
         return;
     }
 
+    /* 推进单击 / 双击 / 长按 判定的定时器 */
+    KbdCore_TickKeys(Key_GetTickMs());
+
     /* 处理普通按键事件 */
     while (Key_GetEvent(&key_evt))
     {
@@ -168,14 +208,13 @@ static bool IsBootLayerModifierHeld(void) { return (BootKey_IsPressed() == 1); }
  */
 void KBD_Core_HandleKeyEvent(const key_event_t *evt)
 {
-    const kbd_action_t *action = NULL;
-
     if (evt == NULL || evt->key >= KBD_MAX_KEYS)
         return;
 
     KBD_Mode_RecordActivity();
 
     bool pressed = (evt->type == KEY_EVT_PRESS);
+    const uint32_t now_ms = Key_GetTickMs();
 
     /* 按下效果：记录按键事件到 RGB 引擎 */
     if (pressed)
@@ -192,6 +231,7 @@ void KBD_Core_HandleKeyEvent(const key_event_t *evt)
         if (target_layer < keymap->num_layers)
         {
             LOG_I(TAG, "BOOT+Key%d -> Layer %d", evt->key, target_layer);
+            AbortGesture(evt->key); /* 丢弃该键待定的双击/长按判定 */
             SwitchLayer(target_layer);
             memset(&s_active_actions[evt->key], 0, sizeof(s_active_actions[evt->key]));
             s_active_action_valid[evt->key] = 1;
@@ -199,38 +239,20 @@ void KBD_Core_HandleKeyEvent(const key_event_t *evt)
         }
     }
 
+    /* 不支持手势的键位（如旋钮虚拟键）保持原有即时行为 */
+    if (!GestureEnabledForKey(evt->key))
+    {
+        HandlePlainKey(evt->key, pressed);
+        return;
+    }
+
     if (pressed)
     {
-        s_active_action_valid[evt->key] = 0;
-        memset(&s_active_actions[evt->key], 0, sizeof(s_active_actions[evt->key]));
-        action = KBD_GetKeyAction(evt->key);
-        if (action != NULL)
-        {
-            s_active_actions[evt->key] = *action;
-            s_active_action_valid[evt->key] = 1;
-            action = &s_active_actions[evt->key];
-        }
-    }
-    else if (s_active_action_valid[evt->key])
-    {
-        action = &s_active_actions[evt->key];
+        GesturePress(evt->key, now_ms);
     }
     else
     {
-        action = KBD_GetKeyAction(evt->key);
-    }
-
-    if (action == NULL)
-        return;
-
-    LOG_D(TAG, "key %d %s", evt->key, pressed ? "press" : "release");
-    KBD_Log_KeyEvent(evt->key, pressed ? 1 : 0, action->type, action->param1);
-    ExecuteKeyAction(evt->key, action, pressed);
-
-    if (!pressed)
-    {
-        s_active_action_valid[evt->key] = 0;
-        memset(&s_active_actions[evt->key], 0, sizeof(s_active_actions[evt->key]));
+        GestureRelease(evt->key, now_ms);
     }
 }
 
@@ -379,6 +401,7 @@ static void ResetInputState(void)
     memset(s_active_action_valid, 0, sizeof(s_active_action_valid));
     memset(s_momentary_layer_active, 0, sizeof(s_momentary_layer_active));
     memset(s_momentary_restore_layer, 0, sizeof(s_momentary_restore_layer));
+    ResetKeyFsm();
     s_pressed_count = 0;
     s_current_modifier = 0;
     s_current_mouse_buttons = 0;
@@ -557,9 +580,297 @@ static void UpdateMouseButtons(uint8_t buttons, bool pressed)
     }
 }
 
+/*============================================================================*/
+/* 单击 / 双击 / 长按 判定实现                                                */
+/*============================================================================*/
+
+/**
+ * @brief 清空所有按键的判定状态
+ */
+static void ResetKeyFsm(void)
+{
+    memset(s_key_fsm, 0, sizeof(s_key_fsm));
+    s_last_tick_ms = 0;
+}
+
+/**
+ * @brief 判断指定键位是否参与双击 / 长按判定
+ */
+static bool GestureEnabledForKey(uint8_t key_index)
+{
+#if defined(KBD_LAYOUT_5KEY)
+    /* 五键款：全部物理按键支持双击 / 长按 */
+    return key_index < KBD_TOTAL_KEYS;
+#else
+    /* 旋钮款保持原有行为，旋钮虚拟键位不参与手势判定 */
+    (void)key_index;
+    return false;
+#endif
+}
+
+/**
+ * @brief 判断指定键位的某个动作槽是否已配置
+ */
+static bool IsSlotConfigured(uint8_t key_index, uint8_t slot)
+{
+    const kbd_action_t *action = KBD_GetKeyActionSlot(key_index, slot);
+    return (action != NULL && action->type != KBD_ACTION_NONE);
+}
+
+/**
+ * @brief 未启用手势的键位：沿用按下即触发、松开即释放的原始逻辑
+ */
+static void HandlePlainKey(uint8_t key_index, bool pressed)
+{
+    const kbd_action_t *action = NULL;
+
+    if (pressed)
+    {
+        s_active_action_valid[key_index] = 0;
+        memset(&s_active_actions[key_index], 0, sizeof(s_active_actions[key_index]));
+        action = KBD_GetKeyAction(key_index);
+        if (action != NULL)
+        {
+            s_active_actions[key_index] = *action;
+            s_active_action_valid[key_index] = 1;
+            action = &s_active_actions[key_index];
+        }
+    }
+    else if (s_active_action_valid[key_index])
+    {
+        action = &s_active_actions[key_index];
+    }
+    else
+    {
+        action = KBD_GetKeyAction(key_index);
+    }
+
+    if (action == NULL)
+        return;
+
+    LOG_D(TAG, "key %d %s", key_index, pressed ? "press" : "release");
+    KBD_Log_KeyEvent(key_index, pressed ? 1 : 0, action->type, action->param1);
+    ExecuteKeyAction(key_index, action, pressed);
+
+    if (!pressed)
+    {
+        s_active_action_valid[key_index] = 0;
+        memset(&s_active_actions[key_index], 0, sizeof(s_active_actions[key_index]));
+    }
+}
+
+/**
+ * @brief 丢弃指定键位待定的双击 / 长按判定（不补发任何动作）
+ */
+static void AbortGesture(uint8_t key_index)
+{
+    s_key_fsm[key_index].state = KSTATE_IDLE;
+    s_key_fsm[key_index].deadline_ms = 0;
+}
+
+/**
+ * @brief 执行某个动作槽的按下，并缓存该动作供释放时使用
+ */
+static void StartSlotAction(uint8_t key_index, uint8_t slot)
+{
+    const kbd_action_t *action = KBD_GetKeyActionSlot(key_index, slot);
+    if (action == NULL || action->type == KBD_ACTION_NONE)
+    {
+        s_key_fsm[key_index].state = KSTATE_IDLE;
+        return;
+    }
+
+    s_active_actions[key_index] = *action;
+    s_active_action_valid[key_index] = 1;
+
+    s_key_fsm[key_index].state = KSTATE_ACTIVE;
+    s_key_fsm[key_index].slot = slot;
+    s_key_fsm[key_index].deadline_ms = 0;
+
+    LOG_D(TAG, "key %d slot %d down", key_index, slot);
+    KBD_Log_KeyEvent(key_index, 1, action->type, action->param1);
+    ExecuteKeyAction(key_index, &s_active_actions[key_index], true);
+}
+
+/**
+ * @brief 释放当前生效的动作，回到空闲状态
+ */
+static void FinishActiveAction(uint8_t key_index)
+{
+    if (s_key_fsm[key_index].state != KSTATE_ACTIVE)
+    {
+        return;
+    }
+
+    const kbd_action_t *action = NULL;
+    if (s_active_action_valid[key_index])
+    {
+        action = &s_active_actions[key_index];
+    }
+    else
+    {
+        action = KBD_GetKeyActionSlot(key_index, s_key_fsm[key_index].slot);
+    }
+
+    s_key_fsm[key_index].state = KSTATE_IDLE;
+    s_key_fsm[key_index].slot = KBD_SLOT_CLICK;
+
+    if (action != NULL)
+    {
+        LOG_D(TAG, "key %d up", key_index);
+        KBD_Log_KeyEvent(key_index, 0, action->type, action->param1);
+        ExecuteKeyAction(key_index, action, false);
+    }
+
+    s_active_action_valid[key_index] = 0;
+    memset(&s_active_actions[key_index], 0, sizeof(s_active_actions[key_index]));
+}
+
+/**
+ * @brief 立即完成一次点按（按下后马上释放）
+ *
+ * 用于双击窗口超时后的单击补发。
+ */
+static void FireTapAction(uint8_t key_index, uint8_t slot)
+{
+    StartSlotAction(key_index, slot);
+    FinishActiveAction(key_index);
+}
+
+/**
+ * @brief 处理按下事件
+ */
+static void GesturePress(uint8_t key_index, uint32_t now_ms)
+{
+    kbd_key_fsm_t *fsm = &s_key_fsm[key_index];
+
+    /* 双击窗口内的第二次按下 */
+    if (fsm->state == KSTATE_DOUBLE_WAIT &&
+        (int32_t)(now_ms - fsm->deadline_ms) <= 0)
+    {
+        if (IsSlotConfigured(key_index, KBD_SLOT_DOUBLE))
+        {
+            StartSlotAction(key_index, KBD_SLOT_DOUBLE);
+            return;
+        }
+        fsm->state = KSTATE_IDLE;
+    }
+
+    /* 缺少释放事件的异常状态：先收尾再开始新一轮 */
+    if (fsm->state == KSTATE_ACTIVE)
+    {
+        FinishActiveAction(key_index);
+    }
+
+    if (IsSlotConfigured(key_index, KBD_SLOT_LONG))
+    {
+        /* 等待长按阈值，达到阈值前不触发任何动作 */
+        fsm->state = KSTATE_PRESS_HELD;
+        fsm->deadline_ms = now_ms + KBD_GetLongPressMs();
+        return;
+    }
+
+    if (IsSlotConfigured(key_index, KBD_SLOT_DOUBLE))
+    {
+        /* 需要区分单击与双击，按下期间不动作，松开后进入双击窗口 */
+        fsm->state = KSTATE_PRESS_HELD;
+        fsm->deadline_ms = 0u;
+        return;
+    }
+
+    /* 未配置长按与双击：保持零延迟的原始手感 */
+    StartSlotAction(key_index, KBD_SLOT_CLICK);
+}
+
+/**
+ * @brief 处理松开事件
+ */
+static void GestureRelease(uint8_t key_index, uint32_t now_ms)
+{
+    kbd_key_fsm_t *fsm = &s_key_fsm[key_index];
+
+    switch (fsm->state)
+    {
+    case KSTATE_ACTIVE:
+        FinishActiveAction(key_index);
+        break;
+
+    case KSTATE_PRESS_HELD:
+        if (IsSlotConfigured(key_index, KBD_SLOT_DOUBLE))
+        {
+            fsm->state = KSTATE_DOUBLE_WAIT;
+            fsm->deadline_ms = now_ms + KBD_GetDoubleClickMs();
+        }
+        else
+        {
+            /* 因等待长按而未在按下时触发，此处补发单击 */
+            FireTapAction(key_index, KBD_SLOT_CLICK);
+        }
+        break;
+
+    case KSTATE_DOUBLE_WAIT:
+        /* 第二次按下已由 GesturePress 处理，此处不额外动作 */
+        break;
+
+    default:
+        break;
+    }
+}
+
+/**
+ * @brief 推进判定定时器（长按阈值、双击窗口）
+ */
+static void KbdCore_TickKeys(uint32_t now_ms)
+{
+    if (now_ms < s_last_tick_ms)
+    {
+        /* 驱动 tick 被复位（退出低功耗）：丢弃全部待定判定并释放按住的键 */
+        for (uint8_t i = 0; i < KBD_MAX_KEYS; i++)
+        {
+            if (s_key_fsm[i].state == KSTATE_ACTIVE)
+            {
+                FinishActiveAction(i);
+            }
+            s_key_fsm[i].state = KSTATE_IDLE;
+            s_key_fsm[i].deadline_ms = 0;
+        }
+        s_last_tick_ms = now_ms;
+        return;
+    }
+    s_last_tick_ms = now_ms;
+
+    for (uint8_t i = 0; i < KBD_MAX_KEYS; i++)
+    {
+        kbd_key_fsm_t *fsm = &s_key_fsm[i];
+
+        if (fsm->state == KSTATE_PRESS_HELD && fsm->deadline_ms != 0u &&
+            (int32_t)(now_ms - fsm->deadline_ms) >= 0)
+        {
+            StartSlotAction(i, KBD_SLOT_LONG);
+        }
+        else if (fsm->state == KSTATE_DOUBLE_WAIT &&
+                 (int32_t)(now_ms - fsm->deadline_ms) >= 0)
+        {
+            /* 双击窗口超时：确认为单击 */
+            FireTapAction(i, KBD_SLOT_CLICK);
+        }
+    }
+}
+
 static void SwitchLayer(uint8_t target_layer)
 {
     uint8_t old_layer = KBD_GetCurrentLayer();
+
+    /* 切换层会改变键位含义，丢弃尚未确认的双击 / 长按判定 */
+    for (uint8_t i = 0; i < KBD_MAX_KEYS; i++)
+    {
+        if (s_key_fsm[i].state == KSTATE_PRESS_HELD ||
+            s_key_fsm[i].state == KSTATE_DOUBLE_WAIT)
+        {
+            s_key_fsm[i].state = KSTATE_IDLE;
+            s_key_fsm[i].deadline_ms = 0;
+        }
+    }
 
     if (target_layer == old_layer)
     {

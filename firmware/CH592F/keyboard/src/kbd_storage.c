@@ -154,19 +154,24 @@ static const kbd_keymap_t s_default_keymap = {
         {/* 层 1 */
          .keys =
              {
-                 {KBD_ACTION_KEYBOARD, 0, 0x1E, 0}, /* '1' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x1F, 0}, /* '2' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x20, 0}, /* '3' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x21, 0}, /* '4' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x22, 0}, /* '5' */
-                 {KBD_ACTION_NONE, 0, 0, 0},
-                 {KBD_ACTION_NONE, 0, 0, 0},
-                 {KBD_ACTION_NONE, 0, 0, 0},
+                 /* 单击槽: 数字键 1-5 */
+                 {
+                     {KBD_ACTION_KEYBOARD, 0, 0x1E, 0}, /* '1' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x1F, 0}, /* '2' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x20, 0}, /* '3' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x21, 0}, /* '4' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x22, 0}, /* '5' */
+                     KBD_NONE(),
+                     KBD_NONE(),
+                     KBD_NONE(),
+                 },
+                 KBD_EMPTY_SLOT_ROW, /* 双击槽: 出厂留空 */
+                 KBD_EMPTY_SLOT_ROW, /* 长按槽: 出厂留空 */
              }},
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 2 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 3 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 4 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 5 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 2 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 3 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 4 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 5 */
     }};
 
 #elif defined(KBD_LAYOUT_KNOB)
@@ -186,19 +191,24 @@ static const kbd_keymap_t s_default_keymap = {
         {/* 层 1 */
          .keys =
              {
-                 {KBD_ACTION_KEYBOARD, 0, 0x1E, 0},    /* K1: '1' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x1F, 0},    /* K2: '2' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x20, 0},    /* K3: '3' */
-                 {KBD_ACTION_KEYBOARD, 0, 0x21, 0},    /* K4: '4' */
-                 {KBD_ACTION_CONSUMER, 0, 0xE9, 0x00}, /* CW: Vol+ */
-                 {KBD_ACTION_CONSUMER, 0, 0xEA, 0x00}, /* CCW: Vol- */
-                 {KBD_ACTION_CONSUMER, 0, 0xE2, 0x00}, /* Click: Mute */
-                 {KBD_ACTION_NONE, 0, 0, 0},
+                 /* 单击槽 */
+                 {
+                     {KBD_ACTION_KEYBOARD, 0, 0x1E, 0},    /* K1: '1' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x1F, 0},    /* K2: '2' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x20, 0},    /* K3: '3' */
+                     {KBD_ACTION_KEYBOARD, 0, 0x21, 0},    /* K4: '4' */
+                     {KBD_ACTION_CONSUMER, 0, 0xE9, 0x00}, /* CW: Vol+ */
+                     {KBD_ACTION_CONSUMER, 0, 0xEA, 0x00}, /* CCW: Vol- */
+                     {KBD_ACTION_CONSUMER, 0, 0xE2, 0x00}, /* Click: Mute */
+                     KBD_NONE(),
+                 },
+                 KBD_EMPTY_SLOT_ROW, /* 双击槽: 出厂留空 */
+                 KBD_EMPTY_SLOT_ROW, /* 长按槽: 出厂留空 */
              }},
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 2 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 3 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 层 4 */
-        {.keys = {{KBD_ACTION_NONE, 0, 0, 0}}}, /* 预留 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 2 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 3 */
+        {.keys = KBD_EMPTY_KEYS}, /* 层 4 */
+        {.keys = KBD_EMPTY_KEYS}, /* 预留 */
     }};
 
 #else
@@ -260,6 +270,8 @@ static const kbd_system_config_t s_default_system = {
     .deep_sleep_min = 1,        /* DEEP 默认在 LIGHT 后 1 分钟 */
     .os_mode = KBD_OS_MODE_WIN, /* 默认 Win 模式 */
     .seamless_wake = KBD_SEAMLESS_WAKE_ENABLED,
+    .long_press_ms = KBD_DEFAULT_LONG_PRESS_MS,     /* 普通键长按阈值 */
+    .double_click_ms = KBD_DEFAULT_DOUBLE_CLICK_MS, /* 双击窗口 */
 };
 
 /*============================================================================*/
@@ -607,6 +619,14 @@ static void ApplyLoadedConfig(const kbd_config_slot_cache_t *cfg) {
      * the new default without forcing a layout-version reset. */
     s_system_config.seamless_wake = KBD_SEAMLESS_WAKE_ENABLED;
   }
+  if (s_system_config.long_press_ms < KBD_MIN_LONG_PRESS_MS ||
+      s_system_config.long_press_ms > KBD_MAX_LONG_PRESS_MS) {
+    s_system_config.long_press_ms = KBD_DEFAULT_LONG_PRESS_MS;
+  }
+  if (s_system_config.double_click_ms < KBD_MIN_DOUBLE_CLICK_MS ||
+      s_system_config.double_click_ms > KBD_MAX_DOUBLE_CLICK_MS) {
+    s_system_config.double_click_ms = KBD_DEFAULT_DOUBLE_CLICK_MS;
+  }
   memcpy(&s_keymap_config, &cfg->keymap, sizeof(s_keymap_config));
   memcpy(&s_fnkey_config, &cfg->fnkey, sizeof(s_fnkey_config));
   memcpy(&s_rgb_config, &cfg->rgb, sizeof(s_rgb_config));
@@ -899,15 +919,35 @@ uint8_t KBD_PrevLayer(void) {
   return prev;
 }
 
-const kbd_action_t *KBD_GetKeyAction(uint8_t key_index) {
-  if (key_index >= KBD_MAX_KEYS) {
+const kbd_action_t *KBD_GetKeyActionSlot(uint8_t key_index, uint8_t slot) {
+  if (key_index >= KBD_MAX_KEYS || slot >= KBD_ACTION_SLOTS) {
     return NULL;
   }
   uint8_t layer = s_keymap_config.current_layer;
   if (layer >= s_keymap_config.num_layers) {
     layer = s_keymap_config.default_layer;
   }
-  return &s_keymap_config.layers[layer].keys[key_index];
+  return &s_keymap_config.layers[layer].keys[slot][key_index];
+}
+
+const kbd_action_t *KBD_GetKeyAction(uint8_t key_index) {
+  return KBD_GetKeyActionSlot(key_index, KBD_SLOT_CLICK);
+}
+
+uint16_t KBD_GetLongPressMs(void) {
+  uint16_t ms = s_system_config.long_press_ms;
+  if (ms < KBD_MIN_LONG_PRESS_MS || ms > KBD_MAX_LONG_PRESS_MS) {
+    ms = KBD_DEFAULT_LONG_PRESS_MS;
+  }
+  return ms;
+}
+
+uint16_t KBD_GetDoubleClickMs(void) {
+  uint16_t ms = s_system_config.double_click_ms;
+  if (ms < KBD_MIN_DOUBLE_CLICK_MS || ms > KBD_MAX_DOUBLE_CLICK_MS) {
+    ms = KBD_DEFAULT_DOUBLE_CLICK_MS;
+  }
+  return ms;
 }
 
 /*============================================================================*/

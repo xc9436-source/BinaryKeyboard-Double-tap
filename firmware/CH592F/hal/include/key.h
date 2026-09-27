@@ -230,6 +230,13 @@ void Key_FinishDeepWakeSync(void);
 int8_t  Key_IsDown(uint8_t key_index);
 
 /**
+ * @brief 读取按键驱动的毫秒计数。
+ * @return 自 Key_Init()（或最近一次 Key_ExitSleep()）起的毫秒数。
+ * @note 退出低功耗时该计数会被复位，调用方需要处理回绕/回退。
+ */
+uint32_t Key_GetTickMs(void);
+
+/**
  * @brief 读取一个 FN 按键事件（出队）。
  * @param[out] evt 事件输出指针（不可为 NULL）。
  * @return 1 表示成功读到一个事件；0 表示队列为空或参数无效。

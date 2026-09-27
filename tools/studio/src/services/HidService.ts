@@ -3,7 +3,7 @@
  * 统一管理已注册的设备适配器插件
  */
 
-import type { DeviceInfo, DeviceStatus, FnKeyConfig, KeymapConfig, LogConfig, RgbConfig, MacroOverview, MacroHeader, MacroData, OsModeConfig } from '@/types/protocol';
+import type { DeviceInfo, DeviceStatus, FnKeyConfig, KeymapConfig, KeyTuningConfig, LogConfig, RgbConfig, MacroOverview, MacroHeader, MacroData, OsModeConfig } from '@/types/protocol';
 import { showToast } from '@/services/toastService';
 import { createHidAdapters } from './hid/registry';
 import type { BatteryInfo, HidAdapter, HidDeviceEventHandler, HidOptionalOperations } from './hid/common/types';
@@ -184,6 +184,16 @@ export class HidService {
 
   async setFullKeymap(config: KeymapConfig): Promise<void> {
     await this.requireAdapter().setFullKeymap(config);
+  }
+
+  /** 读取按键判定参数；设备不支持返回 null */
+  async getKeyTuning(): Promise<KeyTuningConfig | null> {
+    return this.requireAdapter().getKeyTuning();
+  }
+
+  /** 写入按键判定参数；设备不支持返回 false */
+  async setKeyTuning(config: KeyTuningConfig): Promise<boolean> {
+    return this.requireAdapter().setKeyTuning(config);
   }
 
   async getRgbConfig(): Promise<RgbConfig> {

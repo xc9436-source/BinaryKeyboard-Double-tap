@@ -238,6 +238,29 @@ uint8_t KBD_PrevLayer(void);
  */
 const kbd_action_t* KBD_GetKeyAction(uint8_t key_index);
 
+/**
+ * @brief 获取指定按键在指定动作槽的动作
+ *
+ * @param[in] key_index 按键索引 (0 ~ KBD_MAX_KEYS-1)
+ * @param[in] slot      动作槽 @ref kbd_action_slot_t
+ * @return 按键动作指针，参数非法返回 NULL
+ */
+const kbd_action_t* KBD_GetKeyActionSlot(uint8_t key_index, uint8_t slot);
+
+/**
+ * @brief 获取普通键长按判定阈值 (毫秒)
+ *
+ * 配置非法时返回编译期默认值。
+ */
+uint16_t KBD_GetLongPressMs(void);
+
+/**
+ * @brief 获取双击判定窗口 (毫秒)
+ *
+ * 配置非法时返回编译期默认值。
+ */
+uint16_t KBD_GetDoubleClickMs(void);
+
 /** @} */ /* end of KBD_Storage_Layer */
 
 /*============================================================================*/

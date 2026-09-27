@@ -36,6 +36,8 @@ const COMMAND_NAMES: Record<number, string> = {
   [Command.KEYMAP_SET]: "KEYMAP_SET",
   [Command.LAYER_GET]: "LAYER_GET",
   [Command.LAYER_SET]: "LAYER_SET",
+  [Command.TUNING_GET]: "TUNING_GET",
+  [Command.TUNING_SET]: "TUNING_SET",
   [Command.RGB_GET]: "RGB_GET",
   [Command.RGB_SET]: "RGB_SET",
   [Command.MACRO_INFO]: "MACRO_INFO",
@@ -65,6 +67,8 @@ const COMMAND_LABELS: Record<number, string> = {
   [Command.KEYMAP_SET]: "设置按键映射",
   [Command.LAYER_GET]: "获取当前层",
   [Command.LAYER_SET]: "设置当前层",
+  [Command.TUNING_GET]: "获取按键判定参数",
+  [Command.TUNING_SET]: "设置按键判定参数",
   [Command.RGB_GET]: "获取 RGB 配置",
   [Command.RGB_SET]: "设置 RGB 配置",
   [Command.MACRO_INFO]: "获取宏信息",
@@ -232,6 +236,16 @@ function formatKeyAction(
 // 发送帧解析
 // ============================================================================
 
+const KEYMAP_SLOT_NAMES = ["单击", "双击", "长按"];
+
+/** 解析 KEYMAP 命令的 sub：高 4 位=动作槽，低 4 位=层号 */
+function formatKeymapSub(sub: number): string {
+  const slot = (sub >> 4) & 0x0f;
+  const layer = (sub & 0x0f) + 1;
+  const slotName = KEYMAP_SLOT_NAMES[slot] ?? `槽${slot}`;
+  return `层 ${layer} · ${slotName}`;
+}
+
 export function getCommandName(cmd: number): string {
   return COMMAND_NAMES[cmd] || `UNKNOWN_${hex(cmd)}`;
 }
@@ -262,11 +276,11 @@ export function parseSendFrame(frame: Uint8Array): {
   // 详细解析各命令
   switch (cmd) {
     case Command.KEYMAP_GET:
-      parsed += ` | 层 ${sub + 1}`;
+      parsed += ` | ${formatKeymapSub(sub)}`;
       break;
 
     case Command.KEYMAP_SET: {
-      parsed += ` | 层 ${sub + 1}`;
+      parsed += ` | ${formatKeymapSub(sub)}`;
       if (len >= 35) {
         const numLayers = data[0];
         const defaultLayer = data[2];
@@ -479,7 +493,7 @@ export function parseReceiveFrame(frame: Uint8Array): {
         const numLayers = data[1];
         const curLayer = data[2];
         const defLayer = data[3];
-        parsed += ` | 层 ${sub + 1}/${numLayers} (当前=${curLayer + 1}, 默认=${defLayer + 1})`;
+        parsed += ` | ${formatKeymapSub(sub)}/${numLayers} (当前=${curLayer + 1}, 默认=${defLayer + 1})`;
         const keys: string[] = [];
         for (let i = 0; i < 8 && 4 + i * 4 < len; i++) {
           const offset = 4 + i * 4;

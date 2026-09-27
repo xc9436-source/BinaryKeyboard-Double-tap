@@ -6,7 +6,18 @@ import { useMacroStore } from '@/stores/macroStore';
 import { useTerminalStore } from '@/stores/terminalStore';
 import { showToast } from '@/services/toastService';
 import type { KeyAction } from '@/types/protocol';
-import { createEmptyAction, DeviceProtocol, KeyboardType, KeyboardTypeInfo } from '@/types/protocol';
+import {
+  ACTION_SLOT_LABELS,
+  MAX_DOUBLE_CLICK_MS,
+  MAX_LONG_PRESS_MS,
+  MIN_DOUBLE_CLICK_MS,
+  MIN_LONG_PRESS_MS,
+  ActionSlot,
+  createEmptyAction,
+  DeviceProtocol,
+  KeyboardType,
+  KeyboardTypeInfo,
+} from '@/types/protocol';
 import { createDeviceUiDefinition, hasUiSection } from '@/types/deviceUi';
 import { getHidDevicePlugin } from '@/services/hid/registry';
 
@@ -167,8 +178,28 @@ const currentLayerKeysForDisplay = computed(() => {
     const keyCount = KeyboardTypeInfo[currentKeyboardType.value as KeyboardType]?.keys || 4;
     return Array.from({ length: keyCount }, () => createEmptyAction());
   }
-  return deviceStore.currentLayerKeys;
+  return deviceStore.currentLayerSlotKeys;
 });
+
+/** 是否显示单击 / 双击 / 长按 槽位切换与判定参数 */
+const showGestureBar = computed(
+  () => previewKeyboardType.value < 0 && deviceStore.supportsKeyGestures,
+);
+
+const actionSlotLabels = ACTION_SLOT_LABELS;
+
+function selectActionSlot(slot: ActionSlot) {
+  deviceStore.setActionSlot(slot);
+}
+
+async function applyKeyTuning() {
+  const ok = await deviceStore.saveKeyTuning();
+  if (ok) {
+    showToast('success', '已应用', '按键判定参数已保存到设备');
+  } else {
+    showToast('error', '应用失败', deviceStore.errorMessage || '设备不支持该设置');
+  }
+}
 
 // 配置操作
 async function saveConfig() {
@@ -306,6 +337,53 @@ function onCatAction(action: string) {
                   <span>放弃</span>
                 </button>
               </div>
+            </div>
+          </div>
+          <div v-if="showGestureBar" class="gesture-bar">
+            <div class="gesture-slots">
+              <button
+                v-for="item in actionSlotLabels"
+                :key="item.slot"
+                type="button"
+                class="gesture-slot-btn"
+                :class="{ active: deviceStore.currentActionSlot === item.slot }"
+                :title="item.hint"
+                @click="selectActionSlot(item.slot)"
+              >
+                {{ item.label }}
+              </button>
+            </div>
+            <div class="gesture-tuning">
+              <label class="gesture-field">
+                <span>长按阈值</span>
+                <input
+                  v-model.number="deviceStore.keyTuning.longPressMs"
+                  type="number"
+                  :min="MIN_LONG_PRESS_MS"
+                  :max="MAX_LONG_PRESS_MS"
+                  step="50"
+                />
+                <span class="unit">ms</span>
+              </label>
+              <label class="gesture-field">
+                <span>双击窗口</span>
+                <input
+                  v-model.number="deviceStore.keyTuning.doubleClickMs"
+                  type="number"
+                  :min="MIN_DOUBLE_CLICK_MS"
+                  :max="MAX_DOUBLE_CLICK_MS"
+                  step="10"
+                />
+                <span class="unit">ms</span>
+              </label>
+              <button
+                type="button"
+                class="gesture-apply-btn"
+                :disabled="!deviceStore.keyTuningHasChanges"
+                @click="applyKeyTuning"
+              >
+                应用
+              </button>
             </div>
           </div>
           <div class="keyboard-container">
@@ -535,6 +613,100 @@ function onCatAction(action: string) {
   border-radius: var(--radius-md);
   position: relative;
   z-index: 1;
+}
+
+/* 单击 / 双击 / 长按 槽位切换与判定参数 */
+.gesture-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 1.25rem 0.85rem;
+  border-bottom: 1px solid var(--c-border);
+}
+
+.gesture-slots {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.gesture-slot-btn {
+  padding: 0.3rem 0.85rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--c-text-muted);
+  background: transparent;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.gesture-slot-btn:hover {
+  color: var(--c-text-primary);
+  border-color: var(--c-accent);
+}
+
+.gesture-slot-btn.active {
+  color: #fff;
+  background: var(--c-accent);
+  border-color: var(--c-accent);
+}
+
+.gesture-tuning {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.gesture-field {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--c-text-muted);
+}
+
+.gesture-field input {
+  width: 4.5rem;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.8rem;
+  color: var(--c-text-primary);
+  background: var(--c-bg-tertiary);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+
+.gesture-field .unit {
+  font-size: 0.75rem;
+}
+
+.gesture-apply-btn {
+  padding: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--c-accent);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.gesture-apply-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 900px) {
+  .gesture-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .gesture-tuning {
+    flex-wrap: wrap;
+  }
 }
 
 /* 猫耳独立浮层 — fixed 定位，JS 动态跟踪 keyboard-card 顶部 */

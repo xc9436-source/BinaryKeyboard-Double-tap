@@ -57,6 +57,8 @@ static void HandleKeymapGet(const kbd_cmd_frame_t *frame);
 static void HandleKeymapSet(const kbd_cmd_frame_t *frame);
 static void HandleLayerGet(const kbd_cmd_frame_t *frame);
 static void HandleLayerSet(const kbd_cmd_frame_t *frame);
+static void HandleTuningGet(const kbd_cmd_frame_t *frame);
+static void HandleTuningSet(const kbd_cmd_frame_t *frame);
 static void HandleRgbGet(const kbd_cmd_frame_t *frame);
 static void HandleRgbSet(const kbd_cmd_frame_t *frame);
 static void HandleMacroInfo(const kbd_cmd_frame_t *frame);
@@ -124,6 +126,12 @@ int KBD_Command_Process(const kbd_cmd_frame_t *frame)
     break;
   case KBD_CMD_LAYER_SET:
     HandleLayerSet(frame);
+    break;
+  case KBD_CMD_TUNING_GET:
+    HandleTuningGet(frame);
+    break;
+  case KBD_CMD_TUNING_SET:
+    HandleTuningSet(frame);
     break;
 
   /* RGB 控制 */
@@ -358,13 +366,16 @@ static void HandleCfgOsSet(const kbd_cmd_frame_t *frame)
  */
 static void HandleKeymapGet(const kbd_cmd_frame_t *frame)
 {
-  uint8_t layer = frame->sub;
+  /* sub 高 4 位=动作槽, 低 4 位=层号；单帧只回传一个槽位 (32B) */
+  uint8_t layer = KBD_KEYMAP_SUB_LAYER(frame->sub);
+  uint8_t slot = KBD_KEYMAP_SUB_SLOT(frame->sub);
   kbd_keymap_t *keymap = KBD_GetKeymap();
+  const uint8_t slot_bytes = sizeof(kbd_action_t) * KBD_MAX_KEYS;
 
-  if (layer >= keymap->num_layers)
+  if (layer >= keymap->num_layers || slot >= KBD_ACTION_SLOTS)
   {
     uint8_t resp[1] = {KBD_RESP_ERR_PARAM};
-    KBD_Command_SendResponse(KBD_CMD_KEYMAP_GET, layer, resp, 1);
+    KBD_Command_SendResponse(KBD_CMD_KEYMAP_GET, frame->sub, resp, 1);
     return;
   }
 
@@ -373,10 +384,10 @@ static void HandleKeymapGet(const kbd_cmd_frame_t *frame)
   resp[1] = keymap->num_layers;
   resp[2] = keymap->current_layer;
   resp[3] = keymap->default_layer;
-  memcpy(&resp[4], &keymap->layers[layer], sizeof(kbd_layer_t));
+  memcpy(&resp[4], &keymap->layers[layer].keys[slot], slot_bytes);
 
-  KBD_Command_SendResponse(KBD_CMD_KEYMAP_GET, layer, resp,
-                           4 + sizeof(kbd_layer_t));
+  KBD_Command_SendResponse(KBD_CMD_KEYMAP_GET, frame->sub, resp,
+                           4 + slot_bytes);
 }
 
 /**
@@ -384,26 +395,29 @@ static void HandleKeymapGet(const kbd_cmd_frame_t *frame)
  */
 static void HandleKeymapSet(const kbd_cmd_frame_t *frame)
 {
-  uint8_t layer = frame->sub;
+  /* sub 高 4 位=动作槽, 低 4 位=层号；单帧只写入一个槽位 (32B) */
+  uint8_t layer = KBD_KEYMAP_SUB_LAYER(frame->sub);
+  uint8_t slot = KBD_KEYMAP_SUB_SLOT(frame->sub);
   kbd_keymap_t *keymap = KBD_GetKeymap();
-  const uint8_t expected_len = 3 + sizeof(kbd_layer_t);
+  const uint8_t slot_bytes = sizeof(kbd_action_t) * KBD_MAX_KEYS;
+  const uint8_t expected_len = 3 + slot_bytes;
 
-  if (layer >= KBD_GetDefaultLayers())
+  if (layer >= KBD_GetDefaultLayers() || slot >= KBD_ACTION_SLOTS)
   {
     uint8_t resp[1] = {KBD_RESP_ERR_PARAM};
-    KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, layer, resp, 1);
+    KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, frame->sub, resp, 1);
     return;
   }
 
-  /* 数据格式: [numLayers:1][reserved:1][defaultLayer:1][layer_data:32] = 35
+  /* 数据格式: [numLayers:1][reserved:1][defaultLayer:1][slot_data:32] = 35
    * bytes */
   if (frame->len >= expected_len)
   {
     uint8_t num_layers = frame->data[0];
     uint8_t default_layer = frame->data[2];
 
-    LOG_D(TAG, "Keymap set: layer=%d numLayers=%d defLayer=%d len=%d", layer,
-          num_layers, default_layer, frame->len);
+    LOG_D(TAG, "Keymap set: layer=%d slot=%d numLayers=%d defLayer=%d len=%d",
+          layer, slot, num_layers, default_layer, frame->len);
 
     if (num_layers > 0 && num_layers <= KBD_GetDefaultLayers())
     {
@@ -414,20 +428,96 @@ static void HandleKeymapSet(const kbd_cmd_frame_t *frame)
       keymap->default_layer = default_layer;
     }
 
-    memcpy(&keymap->layers[layer], &frame->data[3], sizeof(kbd_layer_t));
+    memcpy(&keymap->layers[layer].keys[slot], &frame->data[3], slot_bytes);
   }
   else
   {
     uint8_t resp[1] = {KBD_RESP_ERR_PARAM};
     LOG_W(TAG, "Keymap data too short: len=%d need=%d", frame->len,
           expected_len);
-    KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, layer, resp, 1);
+    KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, frame->sub, resp, 1);
     return;
   }
 
   uint8_t resp[1] = {KBD_RESP_OK};
-  KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, layer, resp, 1);
-  LOG_D(TAG, "Keymap set: layer=%d", layer);
+  KBD_Command_SendResponse(KBD_CMD_KEYMAP_SET, frame->sub, resp, 1);
+  LOG_D(TAG, "Keymap set: layer=%d slot=%d", layer, slot);
+}
+
+/**
+ * @brief 处理按键判定参数获取（长按阈值 / 双击窗口）
+ *
+ * 响应: [status][long_ms:2 LE][double_ms:2 LE]
+ */
+static void HandleTuningGet(const kbd_cmd_frame_t *frame)
+{
+  (void)frame;
+  uint16_t long_ms = KBD_GetLongPressMs();
+  uint16_t double_ms = KBD_GetDoubleClickMs();
+
+  uint8_t resp[5];
+  resp[0] = KBD_RESP_OK;
+  resp[1] = (uint8_t)(long_ms & 0xFF);
+  resp[2] = (uint8_t)(long_ms >> 8);
+  resp[3] = (uint8_t)(double_ms & 0xFF);
+  resp[4] = (uint8_t)(double_ms >> 8);
+
+  KBD_Command_SendResponse(KBD_CMD_TUNING_GET, 0, resp, sizeof(resp));
+}
+
+/**
+ * @brief 处理按键判定参数设置
+ *
+ * 数据: [long_ms:2 LE][double_ms:2 LE]，0 表示恢复默认值
+ */
+static void HandleTuningSet(const kbd_cmd_frame_t *frame)
+{
+  if (frame->len < 4)
+  {
+    uint8_t resp[1] = {KBD_RESP_ERR_PARAM};
+    KBD_Command_SendResponse(KBD_CMD_TUNING_SET, 0, resp, 1);
+    return;
+  }
+
+  uint16_t long_ms = (uint16_t)(frame->data[0] | ((uint16_t)frame->data[1] << 8));
+  uint16_t double_ms = (uint16_t)(frame->data[2] | ((uint16_t)frame->data[3] << 8));
+
+  if (long_ms == 0)
+  {
+    long_ms = KBD_DEFAULT_LONG_PRESS_MS;
+  }
+  if (double_ms == 0)
+  {
+    double_ms = KBD_DEFAULT_DOUBLE_CLICK_MS;
+  }
+  if (long_ms < KBD_MIN_LONG_PRESS_MS)
+  {
+    long_ms = KBD_MIN_LONG_PRESS_MS;
+  }
+  else if (long_ms > KBD_MAX_LONG_PRESS_MS)
+  {
+    long_ms = KBD_MAX_LONG_PRESS_MS;
+  }
+  if (double_ms < KBD_MIN_DOUBLE_CLICK_MS)
+  {
+    double_ms = KBD_MIN_DOUBLE_CLICK_MS;
+  }
+  else if (double_ms > KBD_MAX_DOUBLE_CLICK_MS)
+  {
+    double_ms = KBD_MAX_DOUBLE_CLICK_MS;
+  }
+
+  kbd_system_config_t *sys = KBD_GetSystemConfig();
+  sys->long_press_ms = long_ms;
+  sys->double_click_ms = double_ms;
+
+  LOG_D(TAG, "Tuning set: long=%ums double=%ums", long_ms, double_ms);
+
+  /* 仅更新 RAM；持久化由 Studio 的「保存配置」(CFG_SAVE) 触发，
+   * 避免在 HID 中断上下文中擦写 Flash。 */
+
+  uint8_t resp[1] = {KBD_RESP_OK};
+  KBD_Command_SendResponse(KBD_CMD_TUNING_SET, 0, resp, 1);
 }
 
 /**

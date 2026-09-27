@@ -9,7 +9,7 @@ import {
   type ConfigBackupMacroEntry,
   type ConfigCompatibilityResult,
 } from '@/types/configBackup';
-import type { DeviceInfo, MacroData } from '@/types/protocol';
+import type { DeviceInfo, KeymapConfig, MacroData } from '@/types/protocol';
 import { ActionType, FnAction, MacroActionType } from '@/types/protocol';
 
 const MEOWFS_ENTRY_HEADER_BYTES = 2;
@@ -410,6 +410,21 @@ export function checkConfigCompatibility(backup: ConfigBackupFile): ConfigCompat
   return { ok: blocking.length === 0, blocking, warnings };
 }
 
+/**
+ * 补齐旧版备份缺少的双击 / 长按槽位
+ *
+ * 布局升级前的配置文件只有 keys 字段，这里补空槽，避免写入时被跳过。
+ */
+function normalizeBackupKeymap(keymap: KeymapConfig): KeymapConfig {
+  const normalized = cloneJson(keymap);
+  normalized.layers = normalized.layers.map((layer) => ({
+    keys: Array.isArray(layer?.keys) ? layer.keys : [],
+    doubleKeys: Array.isArray(layer?.doubleKeys) ? layer.doubleKeys : [],
+    longKeys: Array.isArray(layer?.longKeys) ? layer.longKeys : [],
+  }));
+  return normalized;
+}
+
 export async function applyConfigBackupToDevice(backup: ConfigBackupFile): Promise<void> {
   await verifyConfigBackupIntegrity(backup);
   const compatibility = checkConfigCompatibility(backup);
@@ -422,7 +437,7 @@ export async function applyConfigBackupToDevice(backup: ConfigBackupFile): Promi
     await assertMacrosFitCurrentDevice(backup.config.macros);
   }
 
-  await hidService.setFullKeymap(cloneJson(backup.config.keymap));
+  await hidService.setFullKeymap(normalizeBackupKeymap(cloneJson(backup.config.keymap)));
   if (backup.config.rgb && info.capabilities.rgb) {
     await hidService.setRgbConfig(cloneJson(backup.config.rgb));
   }

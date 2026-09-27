@@ -38,12 +38,20 @@ extern "C"
    */
 
 #define KBD_CONFIG_MAGIC 0x4D454F57             /**< 配置魔数 "MEOW" */
-#define KBD_CONFIG_LAYOUT_ID 0x0103             /**< 本地 DataFlash 布局版本 */
+#define KBD_CONFIG_LAYOUT_ID 0x0104             /**< 本地 DataFlash 布局版本 */
 #define KBD_CONFIG_VERSION KBD_CONFIG_LAYOUT_ID /**< 配置版本 */
 
 #define KBD_MAX_LAYERS 5  /**< 配置结构层数组容量上限 */
 #define KBD_MAX_KEYS 8    /**< 单层最大按键数 (支持所有类型) */
 #define KBD_MAX_FN_KEYS 4 /**< 最大 FN 键数 */
+
+/**
+ * @brief 按键动作槽位数量
+ *
+ * 每个键位可绑定 3 个动作：单击 / 双击 / 长按。
+ * 修改此值会改变 kbd_keymap_t 大小，需同步核对 DataFlash 槽容量。
+ */
+#define KBD_ACTION_SLOTS 3
 
 #define KBD_MACRO_SLOTS 255        /**< 宏逻辑索引上限 (param1 为 uint8_t) */
 #define KBD_MACRO_MAX_SIZE 8192    /**< MeowFS 总容量 (8KB) */
@@ -52,6 +60,30 @@ extern "C"
 
 #define KBD_SEAMLESS_WAKE_ENABLED  0xA5u
 #define KBD_SEAMLESS_WAKE_DISABLED 0x5Au
+
+/**
+ * @brief 按键动作槽位
+ *
+ * 每个键位有 3 个可独立配置的动作槽。
+ */
+typedef enum
+{
+  KBD_SLOT_CLICK = 0,  /**< 单击：单次按下（默认行为） */
+  KBD_SLOT_DOUBLE = 1, /**< 双击：双击窗口内二次按下 */
+  KBD_SLOT_LONG = 2,   /**< 长按：按住达到阈值 */
+} kbd_action_slot_t;
+
+/** @brief 长按判定阈值默认值 (毫秒) */
+#define KBD_DEFAULT_LONG_PRESS_MS 500u
+/** @brief 双击判定窗口默认值 (毫秒) */
+#define KBD_DEFAULT_DOUBLE_CLICK_MS 250u
+
+/** @brief 长按阈值可调范围 (毫秒) */
+#define KBD_MIN_LONG_PRESS_MS 100u
+#define KBD_MAX_LONG_PRESS_MS 5000u
+/** @brief 双击窗口可调范围 (毫秒) */
+#define KBD_MIN_DOUBLE_CLICK_MS 80u
+#define KBD_MAX_DOUBLE_CLICK_MS 1000u
 
 /**
  * @brief 设备信息常量
@@ -74,10 +106,17 @@ extern "C"
 
 #define KBD_FLASH_BASE 0x00000        /**< DataFlash 基址 */
 #define KBD_FLASH_HEADER 0x00000      /**< 配置头偏移 (32B, 槽位内偏移) */
+#define KBD_FLASH_FNKEY 0x00020       /**< FN 键配置偏移 (32B, 槽位内偏移) */
+#define KBD_FLASH_RGB 0x00040         /**< RGB 配置偏移 (32B, 槽位内偏移) */
 #define KBD_FLASH_SYSTEM 0x00100      /**< 系统配置偏移 (64B, 槽位内偏移) */
-#define KBD_FLASH_KEYMAP 0x00200      /**< 按键映射偏移 (164B, 槽位内偏移) */
-#define KBD_FLASH_FNKEY 0x00300       /**< FN 键配置偏移 (32B, 槽位内偏移) */
-#define KBD_FLASH_RGB 0x00340         /**< RGB 配置偏移 (32B, 槽位内偏移) */
+/**
+ * @brief 按键映射偏移 (484B, 槽位内偏移)
+ *
+ * 布局版本 0x0104 起每键位支持 单击/双击/长按 三个动作槽，
+ * keymap 由 164B 增长为 484B，占用 0x200~0x3E3；
+ * 原 FN(0x300) 与 RGB(0x340) 已迁移到 0x020 / 0x040 的保留区。
+ */
+#define KBD_FLASH_KEYMAP 0x00200
 #define KBD_FLASH_RESERVED 0x00400    /**< 单配置槽大小 / 下一页起始 (1KB) */
 #define KBD_FLASH_MACRO_BASE 0x01000  /**< 宏数据区起始（0x0000~0x0BFF 配置槽；0x0C00~0x0FFF runtime 热数据） */
 #define KBD_FLASH_MACRO_SIZE 0x02000  /**< MeowFS 宏数据区大小 (8KB) */
@@ -171,15 +210,18 @@ extern "C"
   } kbd_action_t;
 
   /**
-   * @brief 单层按键映射 (32 字节)
+   * @brief 单层按键映射 (96 字节)
+   *
+   * 第一维为动作槽 @ref kbd_action_slot_t，第二维为键位索引。
+   * 单个槽位连续 32 字节，便于按槽分包传输。
    */
   typedef struct __attribute__((packed))
   {
-    kbd_action_t keys[KBD_MAX_KEYS]; /**< 按键动作数组 */
+    kbd_action_t keys[KBD_ACTION_SLOTS][KBD_MAX_KEYS]; /**< 按键动作数组 */
   } kbd_layer_t;
 
   /**
-   * @brief 完整按键映射配置 (164 字节)
+   * @brief 完整按键映射配置 (484 字节)
    */
   typedef struct __attribute__((packed))
   {
@@ -189,6 +231,17 @@ extern "C"
     uint8_t reserved;                   /**< 保留字段 */
     kbd_layer_t layers[KBD_MAX_LAYERS]; /**< 层映射数组 */
   } kbd_keymap_t;
+
+  /**
+   * @brief 编译期校验：keymap 不得超出配置槽内 0x200 起的可用空间
+   *
+   * 增加动作槽或层数后若超出容量，这里会直接编译失败。
+   */
+  typedef char
+      kbd_keymap_size_check[(sizeof(kbd_keymap_t) <=
+                             (KBD_FLASH_RESERVED - KBD_FLASH_KEYMAP))
+                                ? 1
+                                : -1];
 
   /** @} */ /* end of KBD_KeyMapping */
 
@@ -411,7 +464,9 @@ extern "C"
     uint8_t deep_sleep_min;  /**< DEEP 延时 (在 LIGHT 后, 分钟, 0=禁用) */
     uint8_t os_mode;         /**< 系统模式 (0=Win, 1=Mac) */
     uint8_t seamless_wake;   /**< 唤醒首键透传，使用 KBD_SEAMLESS_WAKE_* 标记 */
-    uint8_t reserved[57];    /**< 保留字段 */
+    uint16_t long_press_ms;  /**< 普通键长按判定阈值 (毫秒, 0=用默认值) */
+    uint16_t double_click_ms;/**< 双击判定窗口 (毫秒, 0=用默认值) */
+    uint8_t reserved[53];    /**< 保留字段 */
   } kbd_system_config_t;
 
   typedef enum
@@ -465,6 +520,8 @@ extern "C"
     KBD_CMD_KEYMAP_SET = 0x21, /**< 设置按键映射 */
     KBD_CMD_LAYER_GET = 0x22,  /**< 获取当前层信息 */
     KBD_CMD_LAYER_SET = 0x23,  /**< 设置当前层 */
+    KBD_CMD_TUNING_GET = 0x24, /**< 获取按键判定参数 (长按/双击阈值) */
+    KBD_CMD_TUNING_SET = 0x25, /**< 设置按键判定参数 (长按/双击阈值) */
 
     /* RGB 控制 0x30-0x3F */
     KBD_CMD_RGB_GET = 0x30, /**< 获取 RGB 配置 */
@@ -574,6 +631,30 @@ extern "C"
 
 /** @brief 创建空动作 */
 #define KBD_NONE() {KBD_ACTION_NONE, 0, 0, 0}
+
+/** @brief 单个动作槽的 8 个空键位 */
+#define KBD_EMPTY_SLOT_ROW                                                     \
+  {                                                                            \
+    KBD_NONE(), KBD_NONE(), KBD_NONE(), KBD_NONE(), KBD_NONE(), KBD_NONE(),    \
+        KBD_NONE(), KBD_NONE()                                                 \
+  }
+
+/** @brief 单击 / 双击 / 长按三个槽位全空的键位组 */
+#define KBD_EMPTY_KEYS                                                         \
+  { KBD_EMPTY_SLOT_ROW, KBD_EMPTY_SLOT_ROW, KBD_EMPTY_SLOT_ROW }
+
+/**
+ * @brief 按键映射命令的 sub 字段编码
+ *
+ * 高 4 位 = 动作槽 @ref kbd_action_slot_t，低 4 位 = 层号。
+ * 这样单帧只需携带一个槽位 (32B)，无需扩大 HID 帧。
+ */
+#define KBD_KEYMAP_SUB(slot, layer)                                            \
+  ((uint8_t)((((slot) & 0x0F) << 4) | ((layer) & 0x0F)))
+/** @brief 从 sub 解析层号 */
+#define KBD_KEYMAP_SUB_LAYER(sub) ((sub) & 0x0F)
+/** @brief 从 sub 解析动作槽 */
+#define KBD_KEYMAP_SUB_SLOT(sub) (((sub) >> 4) & 0x0F)
 
 /* 修饰键掩码 */
 #define KBD_MOD_LCTRL 0x01  /**< 左 Ctrl */
